@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
+from datetime import datetime
 import re
 from decimal import Decimal
 
@@ -586,3 +587,207 @@ class DataPreprocessingAdapter:
             "season_ticket_pct": float(df["is_season_ticket"].mean() * 100) if "is_season_ticket" in df.columns else 0,
             "sport_distribution": df["sport_type"].value_counts().to_dict() if "sport_type" in df.columns else {},
         }
+    
+    def create_training_dataset(
+        self,
+        ticket_sales_path: str
+    ) -> pd.DataFrame:
+        """Create a training dataset from ticket sales data.
+        
+        Uses total_tickets (order_qty sum) as the target for revenue/demand prediction.
+        This predicts ticket demand which directly relates to revenue optimization.
+        
+        Args:
+            ticket_sales_path: Path to processed ticket sales CSV
+        
+        Returns:
+            DataFrame ready for training with:
+            - Predictive features
+            - Target: total_revenue or total_tickets
+        """
+        # Load ticket sales
+        ticket_df = pd.read_csv(ticket_sales_path)
+        
+        # Aggregate by event
+        agg_df = self.aggregate_by_event(ticket_df)
+        
+        # Engineer predictive features
+        training_df = self._engineer_predictive_features(agg_df)
+        
+        return training_df
+    
+    def _engineer_predictive_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Engineer features that are PREDICTIVE for demand/revenue forecasting.
+        
+        Args:
+            df: Aggregated DataFrame by event
+        
+        Returns:
+            DataFrame with predictive features
+        """
+        df = df.copy()
+        
+        # Season ticket percentage
+        if 'season_ticket_count' in df.columns and 'total_tickets' in df.columns:
+            df['season_ticket_pct'] = df['season_ticket_count'] / df['total_tickets'].clip(lower=1)
+        
+        # New vs renewal ratio
+        if 'new_ticket_count' in df.columns and 'total_tickets' in df.columns:
+            df['new_ticket_pct'] = df['new_ticket_count'] / df['total_tickets'].clip(lower=1)
+        
+        # Revenue per ticket (pricing strategy indicator)
+        if 'total_revenue' in df.columns and 'total_tickets' in df.columns:
+            df['revenue_per_ticket'] = df['total_revenue'] / df['total_tickets'].clip(lower=1)
+        
+        # Game sequence in season
+        df['game_number'] = df.groupby('season_code').cumcount() + 1
+        
+        # Historical average (from previous games in same season)
+        df = df.sort_values(['season_code', 'event_code'])
+        df['prior_avg_revenue'] = df.groupby('season_code')['total_revenue'].transform(
+            lambda x: x.shift(1).expanding().mean()
+        )
+        df['prior_avg_tickets'] = df.groupby('season_code')['total_tickets'].transform(
+            lambda x: x.shift(1).expanding().mean()
+        )
+        
+        # Fill first game with overall mean
+        overall_revenue_mean = df['total_revenue'].mean()
+        overall_tickets_mean = df['total_tickets'].mean()
+        df['prior_avg_revenue'] = df['prior_avg_revenue'].fillna(overall_revenue_mean)
+        df['prior_avg_tickets'] = df['prior_avg_tickets'].fillna(overall_tickets_mean)
+        
+        # Extract season year for temporal features
+        df['season_year'] = df['season_code'].apply(self._extract_season_year)
+        
+        # Sport type for filtering
+        df['sport_type'] = df['season_code'].apply(self._extract_sport_type)
+        
+        return df
+    
+    def add_weather_features(
+        self,
+        df: pd.DataFrame,
+        api_key: Optional[str] = None
+    ) -> pd.DataFrame:
+        """Add weather features to the training data.
+        
+        Uses historical weather estimates or actual API data if key provided.
+        
+        Args:
+            df: DataFrame with event data
+            api_key: Optional OpenWeatherMap API key
+        
+        Returns:
+            DataFrame with weather features added
+        """
+        from ..adapters.weather_api_adapter import WeatherAPIAdapter
+        from datetime import date
+        import os
+        
+        # Try to get API key from environment if not provided
+        if api_key is None:
+            api_key = os.getenv('OPENWEATHERMAP_API_KEY')
+        
+        # Initialize adapter (works without API key using estimates)
+        if api_key:
+            weather_adapter = WeatherAPIAdapter(api_key=api_key)
+            print("  Using OpenWeatherMap API for weather data")
+        else:
+            # Create adapter with dummy key - will use estimates
+            weather_adapter = WeatherAPIAdapter(api_key="dummy")
+            print("  No API key - using historical weather estimates")
+        
+        # Add weather features for each event
+        weather_features = []
+        
+        for idx, row in df.iterrows():
+            # Try to extract date from event data
+            event_date = None
+            if 'event_date' in df.columns and pd.notna(row.get('event_date')):
+                try:
+                    event_date = pd.to_datetime(row['event_date']).date()
+                except:
+                    pass
+            
+            if event_date is None:
+                # Estimate month from season_code
+                season_code = str(row.get('season_code', ''))
+                month = 10  # Default to October
+                if 'FB' in season_code.upper():
+                    month = 10  # Football: Sept-Nov
+                elif 'BB' in season_code.upper():
+                    month = 1  # Basketball: Nov-Feb
+                event_date = date(2024, month, 15)
+            
+            # Get weather estimate
+            weather_data = weather_adapter._estimate_historical_weather(event_date)
+            comfort_index = weather_adapter.calculate_comfort_index(weather_data)
+            attendance_impact = weather_adapter._estimate_attendance_impact(comfort_index)
+            
+            weather_features.append({
+                'temperature_f': weather_data.temperature_f,
+                'precipitation_prob': weather_data.precipitation_prob,
+                'wind_speed_mph': weather_data.wind_speed_mph,
+                'weather_comfort_index': comfort_index,
+                'weather_attendance_multiplier': attendance_impact,
+            })
+        
+        # Add weather features to dataframe
+        weather_df = pd.DataFrame(weather_features)
+        for col in weather_df.columns:
+            df[col] = weather_df[col].values
+        
+        print(f"  Added {len(weather_df.columns)} weather features")
+        return df
+    
+    def get_feature_columns(self, include_weather: bool = False) -> List[str]:
+        """Get list of feature columns for training.
+        
+        Args:
+            include_weather: Whether to include weather features
+        
+        Returns:
+            List of feature column names
+        """
+        features = [
+            # Ticket composition
+            'season_ticket_pct',
+            'new_ticket_pct',
+            'avg_seat_value_index',
+            
+            # Pricing features
+            'revenue_per_ticket',
+            'avg_unit_price',
+            
+            # Temporal/sequential features
+            'game_number',
+            
+            # Historical performance
+            'prior_avg_revenue',
+            'prior_avg_tickets',
+        ]
+        
+        if include_weather:
+            features.extend([
+                'temperature_f',
+                'precipitation_prob',
+                'wind_speed_mph',
+                'weather_comfort_index',
+                'weather_attendance_multiplier',
+            ])
+        
+        return features
+    
+    def get_target_column(self, target_type: str = 'revenue') -> str:
+        """Get the target column name.
+        
+        Args:
+            target_type: 'revenue' for total_revenue, 'tickets' for total_tickets
+        
+        Returns:
+            Target column name
+        """
+        if target_type == 'tickets':
+            return 'total_tickets'
+        return 'total_revenue'

@@ -15,7 +15,6 @@ data:
   models_dir: "data/models"
   historical_sales: "data/raw/TicketSales_PastData.csv"
   current_sales: "data/raw/Ticket_Sales_by_Event__Henry_BB_26.csv"
-  scan_rates: "data/raw/Scan_rate_FB25.xlsx"
 
 # Model Configuration
 models:
@@ -75,12 +74,20 @@ models:
 optimization:
   # Multi-year pricing optimization
   planning_years: 5
-  min_annual_increase: 0.00
-  max_annual_increase: 0.15  # Churn constraint
-  inflation_floor: 0.03
-  max_acceptable_churn: 0.10
-  churn_elasticity: 2.0
-  baseline_churn: 0.05
+  min_annual_increase: 0.00  # Can freeze prices if needed
+  max_annual_increase: 0.15  # Churn constraint: max 15% per year
+  
+  # IMPORTANT: 3% is INFLATION - at this rate you have NO real gain
+  # Real revenue growth requires increases ABOVE this baseline
+  inflation_floor: 0.03  # 3% = just treading water, no real growth
+  
+  # Churn model parameters
+  max_acceptable_churn: 0.10  # Max 10% churn per year
+  churn_elasticity: 2.0  # How much churn increases per % above threshold
+  baseline_churn: 0.05  # 5% natural churn even with no price increase
+  churn_threshold: 0.05  # Price increases above 5% trigger additional churn
+  
+  # Discount rate for NPV (should be > inflation)
   discount_rate: 0.08
 
   # Objective weights
@@ -89,7 +96,7 @@ optimization:
     attendance: 0.2
     retention: 0.2
 
-  # Optimization method: "scipy" or "pulp"
+  # Optimization method: "scipy" (non-linear) or "pulp" (linear programming)
   default_method: "scipy"
 
 # Feature Engineering Configuration

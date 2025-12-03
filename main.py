@@ -14,10 +14,12 @@ It can be run in different modes:
 import argparse
 import sys
 import os
+import re
 from pathlib import Path
 from datetime import date
 import yaml
 import pandas as pd
+import numpy as np
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -118,79 +120,120 @@ def preprocess_data(config: dict, args: argparse.Namespace) -> None:
 
 
 def train_models(config: dict, args: argparse.Namespace) -> None:
-    """Train the forecasting models."""
+    """Train the forecasting models for revenue/demand prediction.
+    
+    Uses ticket sales data to predict revenue and ticket demand patterns.
+    """
     print("=" * 60)
     print("TRAINING FORECASTING MODELS")
     print("=" * 60)
     
-    # Load processed data
-    data_path = args.input or os.path.join(
+    # Initialize adapter
+    adapter = DataPreprocessingAdapter()
+    
+    # Path to processed ticket sales
+    ticket_sales_path = args.input[0] if args.input else os.path.join(
         config["data"]["processed_dir"],
         "processed_ticket_sales.csv"
     )
     
-    if not os.path.exists(data_path):
-        print(f"Error: Processed data not found at {data_path}")
+    # Check file exists
+    if not os.path.exists(ticket_sales_path):
+        print(f"Error: Processed data not found at {ticket_sales_path}")
         print("Run preprocessing first: python main.py preprocess")
         return
     
-    print(f"Loading data from: {data_path}")
-    df = pd.read_csv(data_path)
+    print(f"Loading ticket sales from: {ticket_sales_path}")
     
-    # Initialize services
-    feature_service = FeatureEngineeringService()
-    forecasting_service = AttendanceForecastingService()
+    # Create training dataset
+    try:
+        training_df = adapter.create_training_dataset(ticket_sales_path)
+    except Exception as e:
+        print(f"Error creating training dataset: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
-    # Aggregate by event for game-level features
-    adapter = DataPreprocessingAdapter()
-    games_df = adapter.aggregate_by_event(df)
+    if training_df is None or len(training_df) == 0:
+        print("\n❌ Error: No training data available!")
+        return
     
-    print(f"Training on {len(games_df)} games")
+    # Target selection: revenue or tickets
+    target_type = 'revenue'  # Can also use 'tickets'
+    target_col = adapter.get_target_column(target_type)
     
-    # For demo purposes, create synthetic target if not available
-    if "actual_attendance" not in games_df.columns:
-        print("Note: Using tickets_sold as proxy for actual_attendance")
-        games_df["actual_attendance"] = games_df["total_qty"] * 0.85  # 85% scan rate
+    print(f"\n✓ Created training dataset with {len(training_df)} events")
+    print(f"  Target: {target_col}")
+    print(f"  Revenue range: ${training_df['total_revenue'].min():,.2f} - ${training_df['total_revenue'].max():,.2f}")
+    print(f"  Tickets range: {training_df['total_tickets'].min():,} - {training_df['total_tickets'].max():,}")
+    print(f"  Mean revenue: ${training_df['total_revenue'].mean():,.2f}")
+    
+    # Try to add weather features
+    include_weather = False
+    try:
+        weather_api_key = os.getenv('OPENWEATHERMAP_API_KEY')
+        print(f"\nAdding weather features...")
+        training_df = adapter.add_weather_features(training_df, api_key=weather_api_key)
+        include_weather = True
+    except Exception as e:
+        print(f"  Warning: Could not add weather features: {e}")
+    
+    # Get feature columns (including weather if available)
+    feature_cols = adapter.get_feature_columns(include_weather=include_weather)
+    available_features = [c for c in feature_cols if c in training_df.columns]
+    
+    print(f"\nUsing {len(available_features)} predictive features:")
+    for f in available_features:
+        print(f"  - {f}")
     
     # Prepare features and target
-    features_list = []
-    for _, row in games_df.iterrows():
-        features = {
-            "tickets_sold": row.get("total_qty", 0),
-            "total_revenue": row.get("total_revenue", 0),
-            "avg_ticket_price": row.get("total_revenue", 0) / max(row.get("total_qty", 1), 1),
-            "transaction_count": row.get("transaction_count", 0),
-        }
-        features_list.append(features)
+    X = training_df[available_features].fillna(0).values
+    y = training_df[target_col].values
+    feature_names = available_features
     
-    features_df = pd.DataFrame(features_list)
-    targets = games_df["actual_attendance"]
-    
-    # Add season for CV
-    if "season_code" in games_df.columns:
-        seasons = games_df["season_code"].apply(lambda x: int(x[-2:]) + 2000 if pd.notna(x) else 2024)
+    # Get season for cross-validation
+    # Use season_code directly as grouping variable (e.g., "FB24", "BB25")
+    # This ensures proper Leave-One-Season-Out CV
+    if 'season_code' in training_df.columns:
+        # Use label encoding for seasons
+        unique_seasons = training_df['season_code'].unique()
+        season_to_int = {s: i for i, s in enumerate(unique_seasons)}
+        seasons_array = training_df['season_code'].map(season_to_int).values
+        print(f"\n  Found {len(unique_seasons)} unique seasons for CV: {list(unique_seasons)}")
     else:
-        seasons = pd.Series([2024] * len(games_df))
+        seasons_array = np.array([0] * len(training_df))
+        print("\n  Warning: No season_code found - CV will use single group")
+    
+    # Initialize forecasting service
+    forecasting_service = AttendanceForecastingService()
     
     # Train models
     print("\nTraining ensemble models...")
-    metrics = forecasting_service.train(features_df, targets, seasons)
+    metrics = forecasting_service.train(X, y, feature_names, seasons_array)
     
-    print("\nTraining Metrics:")
+    print("\n" + "=" * 60)
+    print("TRAINING RESULTS")
+    print("=" * 60)
     print(f"  Samples: {metrics['n_samples']}")
-    print(f"  Training MAE: {metrics['training_mae']:.2f}")
-    print(f"  Training RMSE: {metrics['training_rmse']:.2f}")
+    print(f"  Training MAE: {metrics['training_mae']:,.0f} attendees")
+    print(f"  Training RMSE: {metrics['training_rmse']:,.0f}")
     print(f"  Training MAPE: {metrics['training_mape']:.2f}%")
     
     if "cv_mae" in metrics:
-        print(f"\nCross-Validation Metrics:")
-        print(f"  CV MAE: {metrics['cv_mae']:.2f}")
-        print(f"  CV RMSE: {metrics['cv_rmse']:.2f}")
+        print(f"\nCross-Validation Metrics (Leave-One-Season-Out):")
+        print(f"  CV MAE: {metrics['cv_mae']:,.0f} attendees")
+        print(f"  CV RMSE: {metrics['cv_rmse']:,.0f}")
         print(f"  CV MAPE: {metrics['cv_mape']:.2f}%")
     
     print(f"\nOptimal Ensemble Weights:")
     for model, weight in metrics["ensemble_weights"].items():
         print(f"  {model}: {weight:.3f}")
+    
+    if "feature_importance" in metrics:
+        print(f"\nFeature Importance:")
+        importance = metrics["feature_importance"]
+        for feat, imp in sorted(importance.items(), key=lambda x: -x[1])[:5]:
+            print(f"  {feat}: {imp:.3f}")
     
     # Save model
     output_path = args.output or os.path.join(
@@ -200,13 +243,22 @@ def train_models(config: dict, args: argparse.Namespace) -> None:
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     forecasting_service.save_model(output_path)
-    print(f"\nModel saved to: {output_path}")
+    print(f"\n✓ Model saved to: {output_path}")
+    
+    # Save training data for reference
+    training_data_path = os.path.join(
+        config["data"]["processed_dir"],
+        "training_data_with_attendance.csv"
+    )
+    if training_df is not None:
+        training_df.to_csv(training_data_path, index=False)
+        print(f"✓ Training data saved to: {training_data_path}")
 
 
 def generate_predictions(config: dict, args: argparse.Namespace) -> None:
-    """Generate attendance predictions."""
+    """Generate revenue/demand predictions."""
     print("=" * 60)
-    print("GENERATING ATTENDANCE PREDICTIONS")
+    print("GENERATING REVENUE/DEMAND PREDICTIONS")
     print("=" * 60)
     
     # Load model
@@ -224,92 +276,250 @@ def generate_predictions(config: dict, args: argparse.Namespace) -> None:
     forecasting_service.load_model(model_path)
     print(f"Loaded model from: {model_path}")
     
-    # Example prediction
-    print("\nGenerating sample prediction...")
+    # Get feature names from the trained model
+    feature_names = forecasting_service.feature_names
+    print(f"\nModel expects {len(feature_names)} features:")
+    for f in feature_names:
+        print(f"  - {f}")
     
-    sample_features = pd.DataFrame([{
-        "tickets_sold": 15000,
-        "total_revenue": 300000,
-        "avg_ticket_price": 20,
-        "transaction_count": 5000,
-    }])
+    # Example prediction with correct features
+    print("\nGenerating sample prediction for a hypothetical event...")
+    
+    # Build sample features based on what the model was trained with
+    sample_features_dict = {}
+    for feat in feature_names:
+        if feat == 'season_ticket_pct':
+            sample_features_dict[feat] = 0.01
+        elif feat == 'new_ticket_pct':
+            sample_features_dict[feat] = 0.004
+        elif feat == 'avg_seat_value_index':
+            sample_features_dict[feat] = 1.07
+        elif feat == 'revenue_per_ticket':
+            sample_features_dict[feat] = 20.0
+        elif feat == 'avg_unit_price':
+            sample_features_dict[feat] = 21.0
+        elif feat == 'game_number':
+            sample_features_dict[feat] = 3
+        elif feat == 'prior_avg_revenue':
+            sample_features_dict[feat] = 5000.0
+        elif feat == 'prior_avg_tickets':
+            sample_features_dict[feat] = 250.0
+        else:
+            sample_features_dict[feat] = 0.0
+    
+    sample_features = pd.DataFrame([sample_features_dict])
+    
+    # Ensure columns are in the right order
+    sample_features = sample_features[feature_names]
     
     from src.domain.entities.prediction import PredictionHorizon
-    predictions = forecasting_service.predict(sample_features, horizon=PredictionHorizon.T_24)
+    predictions = forecasting_service.predict(sample_features.values, horizon=PredictionHorizon.T_24)
     
     pred = predictions[0]
     print(f"\nPrediction Results:")
-    print(f"  Predicted Attendance: {pred.predicted_attendance:,}")
-    print(f"  Confidence Interval: {pred.confidence_interval.lower:,} - {pred.confidence_interval.upper:,}")
+    print(f"  Predicted Value: ${pred.predicted_attendance:,.2f}")
+    print(f"  Confidence Interval: ${pred.confidence_interval.lower:,.2f} - ${pred.confidence_interval.upper:,.2f}")
     print(f"  Uncertainty Level: {pred.uncertainty_level.name}")
+    
+    # Show predictions for different scenarios
+    print("\n" + "=" * 60)
+    print("SCENARIO COMPARISON")
+    print("=" * 60)
+    
+    scenarios = [
+        {"name": "Low Price Point", "avg_unit_price": 15.0, "revenue_per_ticket": 14.0},
+        {"name": "Medium Price Point", "avg_unit_price": 25.0, "revenue_per_ticket": 23.0},
+        {"name": "High Price Point", "avg_unit_price": 40.0, "revenue_per_ticket": 38.0},
+    ]
+    
+    print(f"\n{'Scenario':<25} {'Predicted':>15} {'Confidence Interval':>30}")
+    print("-" * 75)
+    
+    for scenario in scenarios:
+        features = sample_features_dict.copy()
+        features.update({k: v for k, v in scenario.items() if k in feature_names})
+        scenario_df = pd.DataFrame([features])[feature_names]
+        preds = forecasting_service.predict(scenario_df.values, horizon=PredictionHorizon.T_24)
+        p = preds[0]
+        print(f"{scenario['name']:<25} ${p.predicted_attendance:>14,.2f} ${p.confidence_interval.lower:>12,.2f} - ${p.confidence_interval.upper:<12,.2f}")
 
 
 def optimize_pricing(config: dict, args: argparse.Namespace) -> None:
-    """Optimize ticket pricing trajectories."""
+    """Optimize ticket pricing for EACH seating level.
+    
+    Outputs specific price recommendations for each seat type for the next 5 years.
+    All increases are ABOVE 3% inflation to provide REAL revenue gains.
+    """
     print("=" * 60)
-    print("OPTIMIZING TICKET PRICING")
+    print("TICKET PRICING OPTIMIZATION - 5 YEAR PLAN")
     print("=" * 60)
     
-    # Initialize services
-    optimization_service = PriceOptimizationService()
+    from src.domain.services.price_optimization_service import OptimizationConfig
     
-    # Example optimization
-    section = args.section or "Lower Reserved"
-    current_price = args.price or 40.0
-    current_season = args.season or 2025
+    # Load processed ticket data
+    ticket_sales_path = os.path.join(
+        config["data"]["processed_dir"],
+        "processed_ticket_sales.csv"
+    )
     
-    print(f"\nOptimizing pricing for {section}")
-    print(f"  Current Price: ${current_price:.2f}")
-    print(f"  Planning Horizon: {config['optimization']['planning_years']} years")
+    if not os.path.exists(ticket_sales_path):
+        print(f"Error: Processed data not found at {ticket_sales_path}")
+        print("Run preprocessing first: python main.py preprocess")
+        return
     
-    from src.domain.entities.pricing_trajectory import SeatingSection, OptimizationConstraints
+    print(f"\nLoading ticket data from: {ticket_sales_path}")
+    ticket_df = pd.read_csv(ticket_sales_path)
+    print(f"  Loaded {len(ticket_df):,} ticket records")
     
-    # Create constraints from config
-    constraints = OptimizationConstraints(
+    # Create optimization config
+    opt_config = OptimizationConfig(
+        planning_years=config["optimization"]["planning_years"],
         min_annual_increase=config["optimization"]["min_annual_increase"],
         max_annual_increase=config["optimization"]["max_annual_increase"],
-        inflation_floor=config["optimization"]["inflation_floor"],
-        max_churn_rate=config["optimization"]["max_acceptable_churn"],
+        inflation_rate=config["optimization"]["inflation_floor"],
+        max_acceptable_churn=config["optimization"]["max_acceptable_churn"],
+        churn_elasticity=config["optimization"].get("churn_elasticity", 2.0),
+        baseline_churn=config["optimization"].get("baseline_churn", 0.05),
     )
     
-    # Determine section enum
-    section_lower = section.lower()
-    if "club" in section_lower:
-        section_enum = SeatingSection.CLUB
-    elif "loge" in section_lower:
-        section_enum = SeatingSection.LOGE
-    elif "lower" in section_lower:
-        section_enum = SeatingSection.LOWER_RESERVED
-    elif "upper" in section_lower:
-        section_enum = SeatingSection.UPPER_RESERVED
-    elif "bleacher" in section_lower:
-        section_enum = SeatingSection.BLEACHERS
+    # Initialize optimization service
+    optimization_service = PriceOptimizationService(config=opt_config)
+    
+    # Try to load trained churn model if available
+    churn_model_path = os.path.join(config["data"]["models_dir"], "churn_model.joblib")
+    if os.path.exists(churn_model_path):
+        print(f"\n  Loading trained churn model from: {churn_model_path}")
+        churn_service = ChurnModelingService()
+        churn_service.load_model(churn_model_path)
+        optimization_service.set_churn_model(churn_service)
     else:
-        section_enum = SeatingSection.LOWER_RESERVED
+        print(f"\n  No trained churn model found - using default churn formula")
+        print(f"    (Train churn model with: python main.py churn --train --input holder_data.csv)")
+    
+    inflation = opt_config.inflation_rate
+    years = opt_config.planning_years
+    
+    print(f"\n  Key Parameters:")
+    print(f"    Inflation: {inflation:.0%} (increases at this rate = NO real gain)")
+    print(f"    Max increase: {opt_config.max_annual_increase:.0%}/year (churn constraint)")
+    print(f"    Churn threshold: 5% (increases above this cause customer loss)")
+    print(f"    Planning horizon: {years} years")
     
     # Run optimization
-    trajectory = optimization_service.create_pricing_trajectory(
-        section=section_enum,
-        current_price=current_price,
-        current_season=current_season,
-        planning_years=config["optimization"]["planning_years"],
-        constraints=constraints,
-        method=args.method or config["optimization"]["default_method"],
-    )
+    results = optimization_service.optimize_all_tickets(ticket_df)
     
-    print(f"\nOptimal 5-Year Pricing Trajectory:")
-    print("-" * 50)
+    # ========================================
+    # LEARNED ELASTICITY BY SEATING LEVEL
+    # ========================================
+    if results.get('seating_recommendations'):
+        print("\n" + "=" * 100)
+        print("PRICE ELASTICITY BY SEATING LEVEL (Learned from Data)")
+        print("=" * 100)
+        print("\n  Elasticity = how much demand drops when price increases")
+        print("  More negative = more price sensitive (careful with increases)")
+        print("  Less negative = less sensitive (can increase more aggressively)")
+        print(f"\n{'Seating Level':<25} {'Elasticity':>12} {'Interpretation':<40}")
+        print("-" * 80)
+        
+        for level, data in sorted(results['seating_recommendations'].items(),
+                                   key=lambda x: -x[1]['current_revenue']):
+            elasticity = data.get('elasticity', -0.5)
+            if elasticity > -0.3:
+                interp = "Very inelastic - can raise prices aggressively"
+            elif elasticity > -0.6:
+                interp = "Inelastic - moderate increases OK"
+            elif elasticity > -1.0:
+                interp = "Unit elastic - balanced approach needed"
+            else:
+                interp = "Elastic - be careful with increases"
+            
+            print(f"  {level[:24]:<25} {elasticity:>10.2f}   {interp:<40}")
+        
+        # ========================================
+        # SEATING LEVEL RECOMMENDATIONS
+        # ========================================
+        print("\n" + "=" * 100)
+        print("RECOMMENDED PRICES BY SEATING LEVEL (5-Year Plan)")
+        print("=" * 100)
+        print(f"\n{'Seating Level':<20} {'Current':>10} {'Year 1':>10} {'Year 2':>10} {'Year 3':>10} {'Year 4':>10} {'Year 5':>10} {'Real Gain':>12}")
+        print("-" * 100)
+        
+        for level, data in sorted(results['seating_recommendations'].items(), 
+                                   key=lambda x: -x[1]['current_revenue']):
+            prices = data['optimal_prices']
+            real_gain = data.get('real_gain_pct', 0)
+            gain_indicator = "✓" if data.get('beats_inflation') else "✗"
+            
+            # Format price string
+            price_str = f"{level[:19]:<20}"
+            price_str += f"${prices[0]:>8.2f} "
+            for i in range(1, min(6, len(prices))):
+                price_str += f"${prices[i]:>8.2f} "
+            price_str += f"{gain_indicator} {real_gain:>+.1f}%"
+            
+            print(price_str)
+        
+        # Show year-over-year increases (NOW DIFFERENT FOR EACH LEVEL)
+        print("\n" + "-" * 100)
+        print(f"{'Seating Level':<20} {'Elasticity':>10} {'Yr1 Inc':>10} {'Yr2 Inc':>10} {'Yr3 Inc':>10} {'Yr4 Inc':>10} {'Yr5 Inc':>10}")
+        print("-" * 100)
+        
+        for level, data in sorted(results['seating_recommendations'].items(),
+                                   key=lambda x: -x[1]['current_revenue']):
+            elasticity = data.get('elasticity', -0.5)
+            increases = data['yearly_increases']
+            inc_str = f"{level[:19]:<20}{elasticity:>10.2f} "
+            for inc in increases[:5]:
+                inc_str += f"{inc:>+9.1%} "
+            print(inc_str)
     
-    for i, year_price in enumerate(trajectory.yearly_prices):
-        increase_pct = (year_price.adjusted_price / current_price - 1) * 100 if i == 0 else \
-            (year_price.adjusted_price / trajectory.yearly_prices[i-1].adjusted_price - 1) * 100
-        print(f"  Year {i+1} ({year_price.season}): ${year_price.adjusted_price:.2f} "
-              f"(+{increase_pct:.1f}%)")
+    # ========================================
+    # PRICE TYPE RECOMMENDATIONS (Top 10)
+    # ========================================
+    if results.get('price_type_recommendations'):
+        print("\n" + "=" * 100)
+        print("RECOMMENDED PRICES BY TICKET TYPE (Top 10 by Revenue)")
+        print("=" * 100)
+        print(f"\n{'Price Type':<25} {'Current':>10} {'Year 1':>10} {'Year 2':>10} {'Year 3':>10} {'Year 4':>10} {'Year 5':>10}")
+        print("-" * 100)
+        
+        # Sort by current revenue and take top 10
+        sorted_types = sorted(results['price_type_recommendations'].items(),
+                              key=lambda x: -x[1]['current_revenue'])[:10]
+        
+        for ptype, data in sorted_types:
+            prices = data['optimal_prices']
+            price_str = f"{ptype[:24]:<25}"
+            price_str += f"${prices[0]:>8.2f} "
+            for i in range(1, min(6, len(prices))):
+                price_str += f"${prices[i]:>8.2f} "
+            print(price_str)
     
-    print("-" * 50)
-    print(f"  Total Expected Revenue: ${trajectory.total_expected_revenue:,.2f}")
-    print(f"  Total Expected Attendance: {trajectory.total_expected_attendance:,.0f}")
-    print(f"  Expected 5-Year Retention: {trajectory.expected_retention_rate:.1%}")
+    # ========================================
+    # SUMMARY
+    # ========================================
+    print("\n" + "=" * 100)
+    print("SUMMARY")
+    print("=" * 100)
+    
+    current = results.get('current_data_summary', {})
+    print(f"\n  Current State:")
+    print(f"    Total Revenue: ${current.get('total_revenue', 0):,.2f}")
+    print(f"    Total Tickets: {current.get('total_tickets', 0):,}")
+    print(f"    Average Price: ${current.get('avg_price', 0):.2f}")
+    
+    # Calculate projected totals
+    if results.get('seating_recommendations'):
+        total_5yr_revenue = sum(d['total_5yr_revenue'] for d in results['seating_recommendations'].values())
+        avg_retention = np.mean([d['final_retention'] for d in results['seating_recommendations'].values()])
+        
+        print(f"\n  5-Year Projection (if recommendations followed):")
+        print(f"    Projected 5-Year Revenue: ${total_5yr_revenue:,.2f}")
+        print(f"    Average Customer Retention: {avg_retention:.1%}")
+    
+    print(f"\n  Key Insight:")
+    print(f"    At 3% inflation, prices must increase by MORE than 3%/year for REAL gains.")
+    print(f"    The recommended increases balance revenue growth against customer churn.")
 
 
 def analyze_churn(config: dict, args: argparse.Namespace) -> None:
@@ -330,8 +540,9 @@ def analyze_churn(config: dict, args: argparse.Namespace) -> None:
     print("\nChurn Estimation by Price Increase:")
     print("-" * 40)
     
+    baseline_churn = 0.05  # 5% baseline churn rate
     for increase in [0.03, 0.05, 0.08, 0.10, 0.12, 0.15]:
-        churn = churn_service.estimate_churn_from_price_increase(increase)
+        churn = churn_service.estimate_churn_from_price_increase(baseline_churn, increase)
         print(f"  {increase:.0%} increase -> {churn:.1%} expected churn")
     
     print("\nNote: Train model with actual holder data for accurate predictions")
@@ -382,26 +593,10 @@ Examples:
     )
     
     parser.add_argument(
-        "--section",
-        help="Seating section for pricing optimization"
-    )
-    
-    parser.add_argument(
-        "--price",
-        type=float,
-        help="Current ticket price"
-    )
-    
-    parser.add_argument(
-        "--season",
-        type=int,
-        help="Current season year"
-    )
-    
-    parser.add_argument(
         "--method",
         choices=["scipy", "pulp"],
-        help="Optimization method"
+        default="scipy",
+        help="Optimization method (scipy for non-linear, pulp for linear programming)"
     )
     
     parser.add_argument(

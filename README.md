@@ -1,27 +1,27 @@
-# Toledo Attendance Forecasting System
+# Toledo Ticket Sales Forecasting System
 
-An AI-driven machine learning system for predicting game attendance and optimizing ticket pricing for University of Toledo Athletics.
+An AI-driven machine learning system for predicting ticket revenue/demand and optimizing ticket pricing for University of Toledo Athletics.
 
 ## Overview
 
 This system provides:
-- **Attendance Forecasting**: Ensemble ML models (XGBoost, Random Forest, Bayesian Ridge, Prophet) to predict game attendance
-- **Price Optimization**: Multi-year ticket pricing trajectory optimization with churn constraints
+- **Revenue/Demand Forecasting**: Ensemble ML models (XGBoost, Random Forest, Bayesian Ridge, Prophet) to predict ticket revenue and demand
+- **Price Optimization**: Multi-year ticket pricing trajectory optimization with churn constraints (using PuLP and scipy)
 - **Churn Modeling**: Season ticket holder retention analysis and risk prediction
-- **Feature Engineering**: Automated feature extraction from ticket sales, weather, and team performance data
+- **Feature Engineering**: Automated feature extraction from ticket sales data
 
 ## Architecture
 
 The system follows **hexagonal architecture** principles with clear separation of concerns:
 
 ```
-toledo_attendance_system/
+ticket_sales/
 ├── src/
 │   ├── domain/                    # Business logic (no external dependencies)
 │   │   ├── entities/              # Core domain objects
-│   │   │   ├── game.py            # Game entity with weather, opponent features
+│   │   │   ├── game.py            # Game entity with features
 │   │   │   ├── ticket_sale.py     # Ticket sale with pricing tiers
-│   │   │   ├── prediction.py      # Attendance prediction with intervals
+│   │   │   ├── prediction.py      # Revenue/demand prediction with intervals
 │   │   │   ├── season_ticket_holder.py  # Holder with churn features
 │   │   │   └── pricing_trajectory.py    # Multi-year pricing plans
 │   │   └── services/              # Domain services
@@ -63,11 +63,12 @@ toledo_attendance_system/
 
 ```bash
 # Clone or copy the repository
-cd toledo_attendance_system
+cd ticket_sales
 
 # Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate  # On Windows
+# source venv/bin/activate  # On Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
@@ -85,23 +86,30 @@ python main.py preprocess --input data/raw/TicketSales_PastData.csv data/raw/Tic
 ### 2. Train Models
 
 ```bash
-# Train ensemble forecasting models
+# Train ensemble forecasting models with hyperparameter tuning
 python main.py train --input data/processed/processed_ticket_sales.csv
 ```
+
+**Note:** Training includes automatic hyperparameter tuning using RandomizedSearchCV. No preset hyperparameters - the model finds optimal values for your data.
 
 ### 3. Generate Predictions
 
 ```bash
-# Generate attendance predictions
+# Generate revenue/demand predictions
 python main.py predict --model data/models/attendance_model.joblib
 ```
 
 ### 4. Optimize Pricing
 
 ```bash
-# Optimize 5-year pricing trajectory
-python main.py optimize --section "Lower Reserved" --price 40 --method scipy
+# Optimize 5-year pricing trajectory (uses actual prices from data)
+python main.py optimize --method scipy
+
+# Or use PuLP for linear programming approach
+python main.py optimize --method pulp
 ```
+
+**Note:** Prices come from your ticket sales data, not hardcoded values. The optimization runs on ALL ticket types together.
 
 ### 5. Analyze Churn
 
@@ -112,7 +120,7 @@ python main.py churn
 
 ## Core Features
 
-### Ensemble Attendance Forecasting
+### Ensemble Revenue/Demand Forecasting
 
 The system uses an optimized ensemble of four models:
 
@@ -125,42 +133,40 @@ The system uses an optimized ensemble of four models:
 
 Weights are optimized via Leave-One-Season-Out cross-validation.
 
-### Multi-Year Price Optimization
+### Multi-Year Price Optimization (PuLP & scipy)
 
 Optimizes ticket prices over a 5-year horizon with constraints:
-- **Inflation Floor**: Minimum 3% annual increase
+- **Inflation (3%)**: This is the FLOOR - at 3%, you're just keeping up with inflation (NO real gain)
 - **Churn Ceiling**: Maximum 15% annual increase (to limit churn)
-- **Churn Elasticity**: Models churn response to price increases
+- **Churn Elasticity**: Models churn response to price increases above 5% threshold
+
+**Key Understanding**: 3% inflation means if you only increase prices by 3% each year, you have ZERO real revenue growth. Real gains require beating inflation.
 
 ```python
+import pandas as pd
 from src.domain.services.price_optimization_service import PriceOptimizationService
-from src.domain.entities.pricing_trajectory import SeatingSection, OptimizationConstraints
 
+# Load your actual ticket data
+ticket_df = pd.read_csv("data/processed/processed_ticket_sales.csv")
+
+# Optimizer extracts prices from data - no hardcoding needed
 optimizer = PriceOptimizationService()
 
-constraints = OptimizationConstraints(
-    min_annual_increase=0.00,
-    max_annual_increase=0.15,  # Churn constraint
-    inflation_floor=0.03,
-    max_churn_rate=0.10,
-)
+# Optimize ALL ticket types together using actual prices from data
+results = optimizer.optimize_all_tickets(ticket_df)
 
-trajectory = optimizer.create_pricing_trajectory(
-    section=SeatingSection.LOWER_RESERVED,
-    current_price=40.0,
-    current_season=2025,
-    planning_years=5,
-    constraints=constraints,
-)
+print(f"Current avg price (from data): ${results['current_data_summary']['avg_price']:.2f}")
+print(f"Optimal year 5 price: ${results['optimal_prices'][-1]:.2f}")
+print(f"Beats inflation: {results['beats_inflation']}")
 ```
 
-### Churn Modeling
+### Churn Modeling with Constraints
 
 Predicts season ticket holder churn using gradient boosting with:
 - Tenure-based features
-- Attendance patterns
 - Revenue trends
 - Seat changes (upgrades/downgrades)
+- Price increase sensitivity
 
 ```python
 from src.domain.services.churn_modeling_service import ChurnModelingService
@@ -168,17 +174,27 @@ from src.domain.services.churn_modeling_service import ChurnModelingService
 churn_service = ChurnModelingService()
 
 # Estimate churn from price increase
-churn_rate = churn_service.estimate_churn_from_price_increase(0.10)  # 10% increase
+churn_rate = churn_service.estimate_churn_from_price_increase(0.05, 0.10)  # baseline 5%, increase 10%
 print(f"Expected churn: {churn_rate:.1%}")
+```
+
+### Facebook Prophet for Seasonality
+
+```python
+from src.infrastructure.adapters.prophet_adapter import ProphetAdapter
+
+prophet = ProphetAdapter()
+prophet.fit(df, yearly_seasonality=True, regressors=['price_level'])
+forecast = prophet.predict(periods=10)
 ```
 
 ### Feature Engineering
 
 Automatically calculates:
-- **Weather Comfort Index**: 0-100 scale based on temperature, wind, precipitation
-- **Opponent Strength Score**: Power 5 = 1.0, MAC = 0.6, FCS = 0.3
-- **Game Importance Factor**: Rivalry +0.4, Homecoming +0.3, Senior Day +0.2
 - **Seat Value Index**: Club = 1.5, Loge = 1.3, Lower = 1.1, Upper = 0.9
+- **Ticket Composition**: Season ticket %, new buyer %
+- **Pricing Metrics**: Revenue per ticket, average unit price
+- **Temporal Features**: Game sequence, historical averages
 
 ## Data Preprocessing
 
@@ -201,18 +217,17 @@ mutate(
 Edit `config/config.yaml` to customize:
 
 ```yaml
-# Model parameters
+# Hyperparameter tuning (model finds optimal params)
 models:
-  xgboost:
-    max_depth: 3
-    learning_rate: 0.03
-    n_estimators: 200
+  tuning_iterations: 50  # RandomizedSearchCV iterations
+  cv_folds: 5  # Cross-validation folds
 
 # Optimization constraints
 optimization:
-  max_annual_increase: 0.15
-  inflation_floor: 0.03
+  max_annual_increase: 0.15  # Churn constraint
+  inflation_floor: 0.03  # 3% = NO REAL GAIN, just inflation
   max_acceptable_churn: 0.10
+  churn_threshold: 0.05  # Above this, churn accelerates
 
 # Churn thresholds
 churn:
@@ -220,38 +235,19 @@ churn:
   price_increase_threshold: 0.05
 ```
 
-## API Integration
+**Important**: The `inflation_floor` of 3% is NOT a target - it's just keeping up with inflation. Real revenue growth requires price increases ABOVE 3%.
 
-### Weather API (OpenWeatherMap)
+## Project Data Files
 
-```python
-from src.infrastructure.adapters.weather_api_adapter import WeatherAPIAdapter
+The system is designed to work with:
+- `TicketSales_PastData.csv` - Historical ticket sales (16,070 rows)
+- `Ticket_Sales_by_Event__Henry_BB_26.csv` - Current season (5,068 rows)
 
-weather = WeatherAPIAdapter(api_key="your_key")
-conditions = weather.get_game_day_conditions(game_date, kickoff_hour=15)
-print(f"Comfort Index: {conditions['comfort_index']}")
-print(f"Attendance Impact: {conditions['attendance_impact']:.1%}")
-```
+## Key Constraints
 
-### Prophet for Seasonality
-
-```python
-from src.infrastructure.adapters.prophet_adapter import ProphetAdapter
-
-prophet = ProphetAdapter()
-prophet.fit(dates, attendance, regressors=['temperature', 'opponent_tier'])
-forecast = prophet.predict(future_dates)
-```
-
-## Performance Expectations
-
-Based on limited historical data (60-70 games):
-
-| Metric | Initial Target | Mature Target |
-|--------|----------------|---------------|
-| MAPE | 15-20% | 12-15% |
-| MAE | 1,500-2,000 | 1,200-1,500 |
-| CI Coverage | 80% | 85% |
+1. **Small Dataset**: ~60-70 events limits model complexity
+2. **Churn Sensitivity**: Price increases >5% trigger accelerated churn
+3. **Regime Changes**: Coach Candle era (2016+) may differ from earlier patterns
 
 ## Testing
 
@@ -263,20 +259,14 @@ pytest tests/ -v
 pytest tests/ --cov=src --cov-report=html
 ```
 
-## Project Files from Knowledge Base
+## ML Methods Used
 
-The system is designed to work with:
-- `TicketSales_PastData.csv` - Historical ticket sales (16,070 rows)
-- `Ticket_Sales_by_Event__Henry_BB_26.csv` - Current season (5,068 rows)
-- `Scan_rate_FB25.xlsx` - Football scan rate data
-- `code_for_Ahmad.R` - Original R preprocessing (replicated in Python)
-
-## Key Constraints
-
-1. **Small Dataset**: ~60-70 games limits model complexity
-2. **Churn Sensitivity**: Price increases >5% trigger accelerated churn
-3. **Weather Dependency**: Outdoor events highly weather-sensitive
-4. **Regime Changes**: Coach Candle era (2016+) may differ from earlier patterns
+1. **XGBoost**: Gradient boosting for non-linear patterns
+2. **Random Forest**: Ensemble of decision trees for robustness
+3. **Bayesian Ridge Regression**: Probabilistic predictions with uncertainty
+4. **Facebook Prophet**: Time series with seasonality decomposition
+5. **PuLP**: Linear/Mixed-Integer Programming for price optimization
+6. **scipy.optimize**: Non-linear optimization for pricing trajectories
 
 ## Contributing
 
