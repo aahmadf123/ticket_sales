@@ -1,0 +1,227 @@
+# Toledo Attendance Forecasting System Configuration
+# config.yaml
+
+# General Settings
+app:
+  name: "Toledo Attendance Forecasting System"
+  version: "1.0.0"
+  environment: "development"  # development, staging, production
+  debug: true
+
+# Data Paths
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  models_dir: "data/models"
+  historical_sales: "data/raw/TicketSales_PastData.csv"
+  current_sales: "data/raw/Ticket_Sales_by_Event__Henry_BB_26.csv"
+  scan_rates: "data/raw/Scan_rate_FB25.xlsx"
+
+# Model Configuration
+models:
+  # XGBoost parameters (conservative for small dataset)
+  xgboost:
+    max_depth: 3
+    min_child_weight: 7
+    subsample: 0.8
+    colsample_bytree: 0.8
+    learning_rate: 0.03
+    n_estimators: 200
+    reg_alpha: 2.0
+    reg_lambda: 2.0
+    objective: "reg:squarederror"
+    random_state: 42
+
+  # Random Forest parameters
+  random_forest:
+    n_estimators: 200
+    max_depth: 4
+    min_samples_split: 12
+    min_samples_leaf: 6
+    max_features: "sqrt"
+    bootstrap: true
+    oob_score: true
+    random_state: 42
+
+  # Bayesian Ridge parameters
+  bayesian_ridge:
+    n_iter: 300
+    tol: 0.001
+    alpha_1: 0.000001
+    alpha_2: 0.000001
+    lambda_1: 0.000001
+    lambda_2: 0.000001
+    compute_score: true
+
+  # Churn model parameters
+  churn:
+    n_estimators: 100
+    max_depth: 4
+    min_samples_split: 10
+    class_weight: "balanced"
+    random_state: 42
+
+  # Ensemble weights (initial - will be optimized)
+  ensemble_weights:
+    xgboost: 0.35
+    random_forest: 0.35
+    bayesian_ridge: 0.20
+    prophet: 0.10
+
+  # Confidence level for prediction intervals
+  confidence_level: 0.80
+
+# Optimization Configuration
+optimization:
+  # Multi-year pricing optimization
+  planning_years: 5
+  min_annual_increase: 0.00
+  max_annual_increase: 0.15  # Churn constraint
+  inflation_floor: 0.03
+  max_acceptable_churn: 0.10
+  churn_elasticity: 2.0
+  baseline_churn: 0.05
+  discount_rate: 0.08
+
+  # Objective weights
+  objective_weights:
+    revenue: 0.6
+    attendance: 0.2
+    retention: 0.2
+
+  # Optimization method: "scipy" or "pulp"
+  default_method: "scipy"
+
+# Feature Engineering Configuration
+features:
+  # Weather comfort index parameters
+  weather:
+    cold_temp_threshold: 40
+    hot_temp_threshold: 85
+    high_wind_threshold: 20
+    temp_weight: 0.4
+    wind_weight: 0.3
+    precip_weight: 0.3
+
+  # Opponent strength parameters
+  opponent:
+    power_five_score: 1.0
+    mac_score: 0.6
+    fcs_score: 0.3
+
+  # Game importance factors
+  importance:
+    rivalry_boost: 0.4
+    homecoming_boost: 0.3
+    senior_day_boost: 0.2
+    special_event_boost: 0.15
+    conference_boost: 0.1
+
+  # Seat value indices by location
+  seat_values:
+    club: 1.5
+    courtside: 1.5
+    loge: 1.3
+    zone_a: 1.3
+    zone_b: 1.1
+    lower: 1.1
+    rocket_fund: 1.2
+    upper: 0.9
+    bleacher: 0.8
+    student: 0.7
+
+# API Configuration
+apis:
+  weather:
+    provider: "openweathermap"
+    base_url: "https://api.openweathermap.org/data/2.5"
+    # API key should be in .env file
+    toledo_lat: 41.6528
+    toledo_lon: -83.6108
+
+  college_football_data:
+    base_url: "https://api.collegefootballdata.com"
+    # API key should be in .env file
+
+# Database Configuration (for production)
+database:
+  enabled: false
+  type: "postgresql"
+  host: "localhost"
+  port: 5432
+  name: "toledo_attendance"
+  # User and password should be in .env file
+
+# Cross-Validation Configuration
+cross_validation:
+  # Leave-One-Season-Out CV
+  method: "leave_one_season_out"
+  min_seasons: 3
+  min_samples: 20
+
+# Churn Thresholds
+churn:
+  high_risk_threshold: 0.7
+  medium_risk_threshold: 0.5
+  low_risk_threshold: 0.3
+  price_increase_threshold: 0.05  # 5% before churn kicks in
+
+# Prediction Horizons
+prediction:
+  horizons:
+    T_7:
+      days_before: 7
+      uncertainty_multiplier: 1.5
+    T_72:
+      days_before: 3
+      uncertainty_multiplier: 1.2
+    T_24:
+      days_before: 1
+      uncertainty_multiplier: 1.0
+    GAME_DAY:
+      days_before: 0
+      uncertainty_multiplier: 0.8
+
+# Stadium Configuration
+stadium:
+  name: "Glass Bowl"
+  capacity: 26000
+  sections:
+    - name: "Club"
+      capacity: 2000
+    - name: "Loge"
+      capacity: 3000
+    - name: "Lower Reserved"
+      capacity: 8000
+    - name: "Upper Reserved"
+      capacity: 6000
+    - name: "Bleachers"
+      capacity: 4000
+    - name: "Student"
+      capacity: 3000
+
+# Performance Targets
+performance:
+  # Initial model targets
+  initial:
+    mape_target: 20
+    mae_target: 2000
+    ci_coverage_target: 80
+
+  # Mature model targets (after 2-3 seasons)
+  mature:
+    mape_target: 15
+    mae_target: 1500
+    ci_coverage_target: 85
+
+  # Aspirational targets
+  aspirational:
+    mape_target: 12
+    mae_target: 1200
+    ci_coverage_target: 90
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/toledo_attendance.log"
