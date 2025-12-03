@@ -92,7 +92,10 @@ def preprocess_data(config: dict, args: argparse.Namespace) -> None:
     
     # Merge datasets
     if len(processed_dfs) > 1:
-        merged = adapter.merge_datasets(processed_dfs)
+        # Concatenate all processed dataframes
+        merged = pd.concat(processed_dfs, ignore_index=True)
+        # Apply final filter
+        merged = merged[merged["event_pmt"] != 0].reset_index(drop=True)
         print(f"\nMerged dataset: {len(merged)} rows")
     else:
         merged = processed_dfs[0]
