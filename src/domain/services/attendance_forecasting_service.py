@@ -23,13 +23,13 @@ from ..entities.game import Game
 
 @dataclass
 class ModelConfig:
-    """Configuration for ML models - these are SEARCH SPACES, not fixed values."""
-    
+    """Configuration for ML models - comprehensive hyperparameter search spaces."""
+
     # Whether to perform hyperparameter tuning
     tune_hyperparameters: bool = True
-    tuning_iterations: int = 50  # Number of random search iterations
+    tuning_iterations: int = 100  # Increased for thorough search
     cv_folds: int = 5  # Cross-validation folds for tuning
-    
+
     # Ensemble weights (will be optimized)
     initial_weights: Dict[str, float] = field(default_factory=lambda: {
         "xgboost": 0.35,
@@ -37,9 +37,49 @@ class ModelConfig:
         "bayesian_ridge": 0.20,
         "prophet": 0.10,
     })
-    
+
     # Confidence interval
     confidence_level: float = 0.80
+
+    # Extended hyperparameter search spaces
+    xgboost_param_space: Dict[str, Any] = field(default_factory=lambda: {
+        "max_depth": (2, 15),
+        "min_child_weight": (1, 30),
+        "gamma": (0.0, 10.0),
+        "subsample": (0.5, 1.0),
+        "colsample_bytree": (0.3, 1.0),
+        "learning_rate": (0.005, 0.3),
+        "n_estimators": (50, 1000),
+        "reg_alpha": (0.0, 10.0),
+        "reg_lambda": (0.1, 10.0),
+    })
+
+    random_forest_param_space: Dict[str, Any] = field(default_factory=lambda: {
+        "n_estimators": (50, 1000),
+        "max_depth": (2, 50),
+        "min_samples_split": (2, 50),
+        "min_samples_leaf": (1, 30),
+        "max_features": ["sqrt", "log2", None, 0.3, 0.5, 0.7, 0.9],
+        "bootstrap": [True, False],
+    })
+
+    bayesian_ridge_param_space: Dict[str, Any] = field(default_factory=lambda: {
+        "alpha_1": (1e-10, 1e-2),
+        "alpha_2": (1e-10, 1e-2),
+        "lambda_1": (1e-10, 1e-2),
+        "lambda_2": (1e-10, 1e-2),
+        "max_iter": (100, 2000),
+        "tol": (1e-8, 1e-2),
+    })
+
+    gradient_boosting_param_space: Dict[str, Any] = field(default_factory=lambda: {
+        "n_estimators": (50, 500),
+        "max_depth": (2, 10),
+        "min_samples_split": (2, 30),
+        "min_samples_leaf": (1, 20),
+        "learning_rate": (0.01, 0.3),
+        "subsample": (0.5, 1.0),
+    })
 
 
 class AttendanceForecastingService:
@@ -124,32 +164,34 @@ class AttendanceForecastingService:
         return self.training_metrics
     
     def _tune_and_train_xgboost(self, X: np.ndarray, y: np.ndarray, cv_folds: int):
-        """Tune and train XGBoost model with RandomizedSearchCV."""
+        """Tune and train XGBoost model with comprehensive RandomizedSearchCV."""
         try:
             import xgboost as xgb
 
-            # Expanded hyperparameter search space (wider than before)
+            # Use config-defined search space with expanded ranges
+            ps = self.config.xgboost_param_space
             param_distributions = {
-                "max_depth": randint(2, 11),  # Depth 2-10
-                "min_child_weight": randint(1, 21),  # 1-20
-                "gamma": uniform(0.0, 5.0),  # Regularization for splits
-                "subsample": uniform(0.5, 0.5),  # 0.5 - 1.0
-                "colsample_bytree": uniform(0.5, 0.5),  # 0.5 - 1.0
-                "learning_rate": uniform(0.01, 0.29),  # 0.01 - 0.30
-                "n_estimators": randint(100, 601),  # 100 - 600 trees
-                "reg_alpha": uniform(0.0, 5.0),  # L1
-                "reg_lambda": uniform(0.5, 4.5),  # L2
+                "max_depth": randint(ps["max_depth"][0], ps["max_depth"][1] + 1),
+                "min_child_weight": randint(ps["min_child_weight"][0], ps["min_child_weight"][1] + 1),
+                "gamma": uniform(ps["gamma"][0], ps["gamma"][1] - ps["gamma"][0]),
+                "subsample": uniform(ps["subsample"][0], ps["subsample"][1] - ps["subsample"][0]),
+                "colsample_bytree": uniform(ps["colsample_bytree"][0], ps["colsample_bytree"][1] - ps["colsample_bytree"][0]),
+                "learning_rate": uniform(ps["learning_rate"][0], ps["learning_rate"][1] - ps["learning_rate"][0]),
+                "n_estimators": randint(ps["n_estimators"][0], ps["n_estimators"][1] + 1),
+                "reg_alpha": uniform(ps["reg_alpha"][0], ps["reg_alpha"][1] - ps["reg_alpha"][0]),
+                "reg_lambda": uniform(ps["reg_lambda"][0], ps["reg_lambda"][1] - ps["reg_lambda"][0]),
             }
-            
+
             base_model = xgb.XGBRegressor(
                 objective="reg:squarederror",
                 random_state=42,
                 verbosity=0,
+                early_stopping_rounds=None,  # Disable early stopping for full training
             )
-            
+
             # Negative MAE scorer (sklearn maximizes, so we negate)
             scorer = make_scorer(mean_absolute_error, greater_is_better=False)
-            
+
             search = RandomizedSearchCV(
                 base_model,
                 param_distributions,
@@ -159,39 +201,42 @@ class AttendanceForecastingService:
                 random_state=42,
                 n_jobs=-1,
                 verbose=0,
+                return_train_score=True,
             )
-            
+
             search.fit(X, y)
-            
+
             self.models["xgboost"] = search.best_estimator_
             self.best_params["xgboost"] = search.best_params_
             print(f"    Best XGBoost params: {search.best_params_}")
-            
+            print(f"    Best CV score: {-search.best_score_:.2f} MAE")
+
         except ImportError:
             print("    Warning: XGBoost not installed. Skipping XGBoost model.")
     
     def _tune_and_train_random_forest(self, X: np.ndarray, y: np.ndarray, cv_folds: int):
-        """Tune and train Random Forest model with RandomizedSearchCV."""
+        """Tune and train Random Forest model with comprehensive RandomizedSearchCV."""
         from sklearn.ensemble import RandomForestRegressor
-        
-        # Define hyperparameter search space
+
+        # Use config-defined search space
+        ps = self.config.random_forest_param_space
         param_distributions = {
-            "n_estimators": randint(100, 801),  # 100 - 800 trees
-            "max_depth": randint(3, 31),  # Allow deeper trees
-            "min_samples_split": randint(2, 41),
-            "min_samples_leaf": randint(1, 21),
-            "max_features": ["sqrt", "log2", None, 0.5, 0.75],
-            "bootstrap": [True, False],
+            "n_estimators": randint(ps["n_estimators"][0], ps["n_estimators"][1] + 1),
+            "max_depth": randint(ps["max_depth"][0], ps["max_depth"][1] + 1),
+            "min_samples_split": randint(ps["min_samples_split"][0], ps["min_samples_split"][1] + 1),
+            "min_samples_leaf": randint(ps["min_samples_leaf"][0], ps["min_samples_leaf"][1] + 1),
+            "max_features": ps["max_features"],
+            "bootstrap": ps["bootstrap"],
         }
-        
+
         base_model = RandomForestRegressor(
-            bootstrap=True,
             random_state=42,
             n_jobs=-1,
+            oob_score=True,  # Out-of-bag scoring for extra validation
         )
-        
+
         scorer = make_scorer(mean_absolute_error, greater_is_better=False)
-        
+
         search = RandomizedSearchCV(
             base_model,
             param_distributions,
@@ -201,53 +246,61 @@ class AttendanceForecastingService:
             random_state=42,
             n_jobs=-1,
             verbose=0,
+            return_train_score=True,
         )
-        
+
         search.fit(X, y)
-        
+
         self.models["random_forest"] = search.best_estimator_
         self.best_params["random_forest"] = search.best_params_
         print(f"    Best RF params: {search.best_params_}")
+        print(f"    Best CV score: {-search.best_score_:.2f} MAE")
     
     def _tune_and_train_bayesian_ridge(self, X: np.ndarray, y: np.ndarray, cv_folds: int):
-        """Tune and train Bayesian Ridge model."""
+        """Tune and train Bayesian Ridge model with comprehensive search."""
         from sklearn.linear_model import BayesianRidge
         from sklearn.preprocessing import StandardScaler
-        
+
         # Scale features for Bayesian Ridge
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
-        
-        # Bayesian Ridge has fewer hyperparameters to tune
-        # Use cross-validation to find best alpha/lambda priors
+
+        # Use config-defined search space with log-uniform sampling for priors
+        ps = self.config.bayesian_ridge_param_space
+
+        # Use loguniform for prior parameters (better for spanning orders of magnitude)
+        from scipy.stats import loguniform
+
         param_distributions = {
-            "alpha_1": uniform(1e-8, 1e-4),
-            "alpha_2": uniform(1e-8, 1e-4),
-            "lambda_1": uniform(1e-8, 1e-4),
-            "lambda_2": uniform(1e-8, 1e-4),
-            "max_iter": randint(200, 1001),
-            "tol": uniform(1e-6, 1e-3),
+            "alpha_1": loguniform(ps["alpha_1"][0], ps["alpha_1"][1]),
+            "alpha_2": loguniform(ps["alpha_2"][0], ps["alpha_2"][1]),
+            "lambda_1": loguniform(ps["lambda_1"][0], ps["lambda_1"][1]),
+            "lambda_2": loguniform(ps["lambda_2"][0], ps["lambda_2"][1]),
+            "max_iter": randint(ps["max_iter"][0], ps["max_iter"][1] + 1),
+            "tol": loguniform(ps["tol"][0], ps["tol"][1]),
         }
-        
-        base_model = BayesianRidge()
+
+        base_model = BayesianRidge(compute_score=True)
         scorer = make_scorer(mean_absolute_error, greater_is_better=False)
-        
+
         search = RandomizedSearchCV(
             base_model,
             param_distributions,
-            n_iter=min(20, self.config.tuning_iterations),  # Fewer iterations needed
+            n_iter=min(50, self.config.tuning_iterations),  # More iterations for thorough search
             cv=cv_folds,
             scoring=scorer,
             random_state=42,
             n_jobs=-1,
             verbose=0,
+            return_train_score=True,
         )
-        
+
         search.fit(X_scaled, y)
-        
+
         self.models["bayesian_ridge"] = search.best_estimator_
         self.best_params["bayesian_ridge"] = search.best_params_
         print(f"    Best Bayesian Ridge params: {search.best_params_}")
+        print(f"    Best CV score: {-search.best_score_:.2f} MAE")
     
     def _train_with_defaults(self, X: np.ndarray, y: np.ndarray, n_samples: int):
         """Train with conservative defaults for small datasets."""

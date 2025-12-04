@@ -1,0 +1,247 @@
+# Toledo Athletics Ticket Pricing Configuration
+# All prices are ACTUAL ticket prices (not revenue/event_pmt)
+# Last updated: December 2024
+
+# Note: event_pmt in the data is REVENUE received, not ticket price
+# This file contains the actual ticket prices for each zone/type
+
+# =============================================================================
+# BASKETBALL (Men's)
+# =============================================================================
+basketball_mens:
+  # Suite pricing (full suite, not per seat)
+  inner_suite:
+    zones: ["505", "506", "507", "508", "509", "510"]
+    full_suite_price: 37800.00
+    per_seat_price: 1560.00  # $37,800 / 24.25 seats approx
+    description: "Inner Suite (505-510)"
+    elasticity_tier: "premium"  # Very inelastic
+
+  outer_suite:
+    full_suite_price: 36600.00
+    description: "Outer Suite"
+    elasticity_tier: "premium"
+
+  # Loge seating (premium individual seats)
+  loge:
+    single_seat: 1230.00
+    pair: 2460.00
+    set_of_four: 4920.00
+    description: "Loge seating"
+    elasticity_tier: "premium"
+
+  # Club seating
+  club:
+    base_price: 765.00  # Total per seat
+    rocket_fund_portion: 525.00
+    season_ticket_portion: 240.00
+    w_section_additional: 200.00  # W section is additional $200/seat
+    description: "Club seating ($525 RF + $240 season ticket)"
+    elasticity_tier: "mid_tier"
+
+  # Courtside seating
+  courtside:
+    first_row:
+      total_price: 2000.00
+      rocket_fund_portion: 1760.00
+      season_ticket_portion: 240.00
+      description: "Courtside 1st row - men's"
+      elasticity_tier: "premium"
+    second_row:
+      total_price: 1750.00
+      rocket_fund_portion: 1510.00
+      season_ticket_portion: 240.00
+      description: "Courtside 2nd row - men's"
+      elasticity_tier: "premium"
+
+  # Rocket Fund zones
+  rocket_fund:
+    zone_a:
+      total_price: 615.00
+      rocket_fund_portion: 375.00
+      season_ticket_portion: 240.00
+      description: "Rocket Fund Zone A"
+      elasticity_tier: "mid_tier"
+    zone_b:
+      total_price: 515.00
+      rocket_fund_portion: 275.00
+      season_ticket_portion: 240.00
+      description: "Rocket Fund Zone B"
+      elasticity_tier: "standard"
+    zone_c:
+      total_price: 340.00
+      rocket_fund_portion: 100.00
+      season_ticket_portion: 240.00
+      description: "Rocket Fund Zone C"
+      elasticity_tier: "standard"
+
+# =============================================================================
+# BASKETBALL (Women's)
+# =============================================================================
+basketball_womens:
+  courtside:
+    total_price: 625.00
+    rocket_fund_portion: 425.00
+    season_ticket_portion: 200.00
+    description: "Courtside women's"
+    elasticity_tier: "mid_tier"
+
+  west_reserved:
+    per_seat: 200.00
+    description: "Women's West Reserved"
+    elasticity_tier: "standard"
+
+  east_reserved:
+    per_seat: 180.00
+    description: "Women's East Reserved"
+    elasticity_tier: "standard"
+
+  general_admission:
+    per_seat: 110.00
+    description: "Women's General Admission"
+    elasticity_tier: "budget"
+
+# =============================================================================
+# FOOTBALL
+# =============================================================================
+football:
+  # Note: Football prices to be added - need to look up current pricing
+  # Placeholder based on typical collegiate football pricing structure
+
+  club:
+    description: "Club seating"
+    elasticity_tier: "premium"
+    # Price TBD - search online for current Toledo football pricing
+
+  loge:
+    description: "Loge seating"
+    elasticity_tier: "premium"
+
+  lower_reserved:
+    description: "Lower Reserved"
+    elasticity_tier: "mid_tier"
+
+  upper_reserved:
+    description: "Upper Reserved"
+    elasticity_tier: "standard"
+
+  bleachers:
+    description: "Bleacher seating"
+    elasticity_tier: "budget"
+
+  student:
+    description: "Student section"
+    elasticity_tier: "budget"
+
+# =============================================================================
+# INFLATION AND PRICING POLICY
+# =============================================================================
+pricing_policy:
+  # Annual inflation applied to all prices
+  annual_inflation_rate: 0.03  # 3% per year
+
+  # 5-year planning horizon
+  planning_years: 5
+
+  # Price increase formula:
+  # Year N price = (Year N-1 price * 1.03) + model_predicted_increase
+  # This means 3% is the baseline (just keeping up with inflation)
+  # Any model-predicted increase is REAL growth above inflation
+
+  # Maximum constraints
+  max_annual_increase: 0.15  # 15% max to limit churn
+  min_annual_increase: 0.00  # Can freeze prices if needed
+
+# =============================================================================
+# ELASTICITY TIERS
+# =============================================================================
+# Elasticity = how demand changes with price
+# More negative = more price sensitive (careful with increases)
+# Less negative = less price sensitive (can increase more)
+
+elasticity_tiers:
+  premium:
+    # High-end seats: wealthy buyers, less price sensitive
+    base_elasticity: -0.35
+    range: [-0.5, -0.2]
+    description: "Premium seating - very inelastic, can increase aggressively"
+    optimal_annual_increase_range: [0.08, 0.12]  # 8-12% above inflation
+
+  mid_tier:
+    # Middle-range seats: mixed audience
+    base_elasticity: -0.6
+    range: [-0.8, -0.4]
+    description: "Mid-tier seating - moderately inelastic"
+    optimal_annual_increase_range: [0.05, 0.08]  # 5-8% above inflation
+
+  standard:
+    # Standard seats: general fans
+    base_elasticity: -0.9
+    range: [-1.1, -0.7]
+    description: "Standard seating - near unit elastic"
+    optimal_annual_increase_range: [0.03, 0.05]  # 3-5% above inflation
+
+  budget:
+    # Budget seats: price-sensitive buyers
+    base_elasticity: -1.3
+    range: [-1.6, -1.0]
+    description: "Budget seating - elastic, be careful with increases"
+    optimal_annual_increase_range: [0.00, 0.03]  # 0-3% above inflation
+
+# =============================================================================
+# MAPPING FROM DATA FIELDS TO TICKET TYPES
+# =============================================================================
+# Maps pr_level and price_type from data to actual ticket prices
+
+data_mapping:
+  # pr_level mappings
+  pr_level:
+    # Men's Basketball
+    "MB - Club": "basketball_mens.club"
+    "MB - Loge": "basketball_mens.loge"
+    "MB - Courtside 1": "basketball_mens.courtside.first_row"
+    "MB - Courtside 2": "basketball_mens.courtside.second_row"
+    "MB - Zone A": "basketball_mens.rocket_fund.zone_a"
+    "MB - Zone B": "basketball_mens.rocket_fund.zone_b"
+    "MB - Zone C": "basketball_mens.rocket_fund.zone_c"
+    "MB - Suite Inner": "basketball_mens.inner_suite"
+    "MB - Suite Outer": "basketball_mens.outer_suite"
+
+    # Women's Basketball
+    "WB - Courtside": "basketball_womens.courtside"
+    "WB - West Reserved": "basketball_womens.west_reserved"
+    "WB - East Reserved": "basketball_womens.east_reserved"
+    "WB - GA": "basketball_womens.general_admission"
+
+    # Football
+    "FB - Club": "football.club"
+    "FB - Loge": "football.loge"
+    "FB - Lower Reserved": "football.lower_reserved"
+    "FB - Upper Reserved": "football.upper_reserved"
+    "FB - Bleachers": "football.bleachers"
+    "FB - Student": "football.student"
+
+  # Keywords in pr_level or price_type to determine elasticity tier
+  elasticity_keywords:
+    premium:
+      - "suite"
+      - "courtside"
+      - "loge"
+      - "club"
+      - "vip"
+      - "premium"
+    mid_tier:
+      - "zone a"
+      - "zone b"
+      - "reserved"
+      - "box"
+    standard:
+      - "zone c"
+      - "upper"
+      - "general"
+    budget:
+      - "student"
+      - "bleacher"
+      - "lawn"
+      - "standing"
+      - "ga"

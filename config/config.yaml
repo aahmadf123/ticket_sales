@@ -142,13 +142,12 @@ apis:
   weather:
     provider: "openweathermap"
     base_url: "https://api.openweathermap.org/data/2.5"
-    # API key should be in .env file
+    # API key location: Set in .env file as OPENWEATHERMAP_API_KEY
+    # Example .env content:
+    #   OPENWEATHERMAP_API_KEY=your_api_key_here
+    # Get your free API key at: https://openweathermap.org/api
     toledo_lat: 41.6528
     toledo_lon: -83.6108
-
-  college_football_data:
-    base_url: "https://api.collegefootballdata.com"
-    # API key should be in .env file
 
 # Database Configuration (for production)
 database:
