@@ -399,42 +399,37 @@ def optimize_pricing(config: dict, args: argparse.Namespace) -> None:
     inflation = opt_config.inflation_rate
     years = opt_config.planning_years
     
+    print(f"\n  Pricing Formula: Year N = (Year N-1 * 1.03) + predicted_additional")
     print(f"\n  Key Parameters:")
-    print(f"    Inflation: {inflation:.0%} (increases at this rate = NO real gain)")
-    print(f"    Max increase: {opt_config.max_annual_increase:.0%}/year (churn constraint)")
+    print(f"    Base Inflation: {inflation:.0%} (ALWAYS added - just maintains purchasing power)")
+    print(f"    Max total increase: {opt_config.max_annual_increase:.0%}/year (churn constraint)")
     print(f"    Churn threshold: 5% (increases above this cause customer loss)")
     print(f"    Planning horizon: {years} years")
-    
+
     # Run optimization
     results = optimization_service.optimize_all_tickets(ticket_df)
-    
+
     # ========================================
-    # LEARNED ELASTICITY BY SEATING LEVEL
+    # ELASTICITY TIERS BY SEATING LEVEL
     # ========================================
     if results.get('seating_recommendations'):
         print("\n" + "=" * 100)
-        print("PRICE ELASTICITY BY SEATING LEVEL (Learned from Data)")
+        print("ELASTICITY TIERS BY SEATING LEVEL")
         print("=" * 100)
-        print("\n  Elasticity = how much demand drops when price increases")
-        print("  More negative = more price sensitive (careful with increases)")
-        print("  Less negative = less sensitive (can increase more aggressively)")
-        print(f"\n{'Seating Level':<25} {'Elasticity':>12} {'Interpretation':<40}")
-        print("-" * 80)
-        
+        print("\n  Tier determines baseline elasticity and optimal increase range:")
+        print("  - premium: very inelastic (-0.35), can increase 8-12% above inflation")
+        print("  - mid_tier: moderately inelastic (-0.6), increase 5-8% above inflation")
+        print("  - standard: near unit elastic (-0.9), increase 3-5% above inflation")
+        print("  - budget: elastic (-1.3), increase 0-3% above inflation")
+        print(f"\n{'Seating Level':<30} {'Tier':<12} {'Elasticity':>12}")
+        print("-" * 60)
+
         for level, data in sorted(results['seating_recommendations'].items(),
                                    key=lambda x: -x[1]['current_revenue']):
-            elasticity = data.get('elasticity', -0.5)
-            if elasticity > -0.3:
-                interp = "Very inelastic - can raise prices aggressively"
-            elif elasticity > -0.6:
-                interp = "Inelastic - moderate increases OK"
-            elif elasticity > -1.0:
-                interp = "Unit elastic - balanced approach needed"
-            else:
-                interp = "Elastic - be careful with increases"
-            
-            print(f"  {level[:24]:<25} {elasticity:>10.2f}   {interp:<40}")
-        
+            tier = data.get('elasticity_tier', 'standard')
+            elasticity = data.get('elasticity', -0.9)
+            print(f"  {level[:28]:<30} {tier:<12} {elasticity:>10.2f}")
+
         # ========================================
         # SEATING LEVEL RECOMMENDATIONS
         # ========================================
@@ -443,35 +438,36 @@ def optimize_pricing(config: dict, args: argparse.Namespace) -> None:
         print("=" * 100)
         print(f"\n{'Seating Level':<20} {'Current':>10} {'Year 1':>10} {'Year 2':>10} {'Year 3':>10} {'Year 4':>10} {'Year 5':>10} {'Real Gain':>12}")
         print("-" * 100)
-        
-        for level, data in sorted(results['seating_recommendations'].items(), 
+
+        for level, data in sorted(results['seating_recommendations'].items(),
                                    key=lambda x: -x[1]['current_revenue']):
             prices = data['optimal_prices']
             real_gain = data.get('real_gain_pct', 0)
-            gain_indicator = "✓" if data.get('beats_inflation') else "✗"
-            
+            gain_indicator = "+" if data.get('beats_inflation') else "="
+
             # Format price string
             price_str = f"{level[:19]:<20}"
             price_str += f"${prices[0]:>8.2f} "
             for i in range(1, min(6, len(prices))):
                 price_str += f"${prices[i]:>8.2f} "
             price_str += f"{gain_indicator} {real_gain:>+.1f}%"
-            
+
             print(price_str)
-        
-        # Show year-over-year increases (NOW DIFFERENT FOR EACH LEVEL)
+
+        # Show breakdown: inflation + additional = total
         print("\n" + "-" * 100)
-        print(f"{'Seating Level':<20} {'Elasticity':>10} {'Yr1 Inc':>10} {'Yr2 Inc':>10} {'Yr3 Inc':>10} {'Yr4 Inc':>10} {'Yr5 Inc':>10}")
+        print("INCREASE BREAKDOWN: 3% Inflation + Model Predicted = Total")
         print("-" * 100)
-        
+        print(f"{'Seating Level':<25} {'Tier':<10} {'Inflation':>10} {'+Additional':>12} {'=Total Y1':>12}")
+        print("-" * 100)
+
         for level, data in sorted(results['seating_recommendations'].items(),
                                    key=lambda x: -x[1]['current_revenue']):
-            elasticity = data.get('elasticity', -0.5)
-            increases = data['yearly_increases']
-            inc_str = f"{level[:19]:<20}{elasticity:>10.2f} "
-            for inc in increases[:5]:
-                inc_str += f"{inc:>+9.1%} "
-            print(inc_str)
+            tier = data.get('elasticity_tier', 'standard')[:9]
+            additional = data.get('additional_increases', [0])[0] if data.get('additional_increases') else 0
+            total = data['yearly_increases'][0] if data.get('yearly_increases') else inflation
+
+            print(f"  {level[:23]:<25} {tier:<10} {inflation:>9.0%} {additional:>+11.1%} {total:>11.1%}")
     
     # ========================================
     # PRICE TYPE RECOMMENDATIONS (Top 10)
